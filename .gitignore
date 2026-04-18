@@ -1,0 +1,26 @@
+# Build directory
+build/
+bin/
+lib/
+
+# Generated compile commands
+compile_commands.json
+
+# Object files and executables (if any in root)
+*.o
+*.obj
+*.exe
+*.out
+implicit-conversion-hazard
+
+# VS Code
+.vscode/
+
+# Temp/Backup files
+*~
+*.swp
+*.bak
+.DS_Store
+
+# Artifacts
+.antigravity/
