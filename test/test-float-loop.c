@@ -31,12 +31,14 @@ void test_float_array_index() {
     double idx = 3.7;
 
     // CRITICAL: float-to-int in array index — truncates to 3
-    int val = arr[idx];  // implicit double->int conversion
+    int idx_int = idx;   // implicit double->int conversion
+    int val = arr[idx_int];  
     (void)val;
 
     // HIGH: float computation used as index
     double computed = floor(5.9);
-    int indexed = arr[computed];  // truncates to 5
+    int computed_int = computed;  // implicit double->int conversion
+    int indexed = arr[computed_int];  
     (void)indexed;
 }
 

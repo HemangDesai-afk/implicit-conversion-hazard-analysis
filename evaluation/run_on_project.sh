@@ -45,40 +45,51 @@ if [[ ! -f "$ANALYZER" ]]; then
 fi
 
 if [[ ! -f "$PROJECT_DIR/compile_commands.json" ]]; then
-    echo "Error: compile_commands.json not found in $PROJECT_DIR"
-    echo "Generate it with: bear -- make  (or cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=1)"
-    exit 1
+    echo "Warning: compile_commands.json not found in $PROJECT_DIR"
+    echo "Falling back to directory scan (using default C/C++ flags)..."
+    echo ""
 fi
 
 mkdir -p "$OUTPUT_DIR"
 PROJECT_NAME=$(basename "$PROJECT_DIR")
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_FILE="${OUTPUT_DIR}/${PROJECT_NAME}_${TIMESTAMP}.txt"
+OUTPUT_DIR="${SCRIPT_DIR}/output"
+MARKDOWN_FILE="${OUTPUT_DIR}/${PROJECT_NAME}_${TIMESTAMP}.md"
 JSON_FILE="${OUTPUT_DIR}/${PROJECT_NAME}_${TIMESTAMP}.json"
 
 echo "=== Running Implicit Conversion Hazard Analyzer ==="
 echo "Project:     $PROJECT_DIR"
 echo "Threshold:   $THRESHOLD"
-echo "Output:      $OUTPUT_FILE"
+echo "Markdown:    $MARKDOWN_FILE"
 echo "=================================================="
 
 # Run on all source files listed in compile_commands.json
 # We use -p to specify the build directory
 cd "$PROJECT_DIR"
 
-# Get list of source files from compile_commands.json
-SOURCE_FILES=$(python3 -c "
+# Get list of source files
+SOURCE_FILES=""
+if [[ -f "compile_commands.json" ]]; then
+    SOURCE_FILES=$(python3 -c "
 import json, sys
-with open('compile_commands.json') as f:
-    db = json.load(f)
-files = set()
-for entry in db:
-    f = entry['file']
-    if f.endswith(('.c', '.cpp', '.cc', '.cxx', '.h', '.hpp')):
-        files.add(f)
-for f in sorted(files):
-    print(f)
+try:
+    with open('compile_commands.json') as f:
+        db = json.load(f)
+    files = set()
+    for entry in db:
+        f = entry['file']
+        if f.endswith(('.c', '.cpp', '.cc', '.cxx', '.h', '.hpp')):
+            files.add(f)
+    for f in sorted(files):
+        print(f)
+except Exception:
+    pass
 " 2>/dev/null || echo "")
+fi
+
+if [[ -z "$SOURCE_FILES" ]]; then
+    SOURCE_FILES=$(find . -maxdepth 4 -name "*.c" -o -name "*.cpp" -o -name "*.cc" | sed 's|^./||' | sort)
+fi
 
 if [[ -z "$SOURCE_FILES" ]]; then
     echo "No source files found in compile_commands.json"
@@ -89,33 +100,30 @@ FILE_COUNT=$(echo "$SOURCE_FILES" | wc -l)
 echo "Files to analyze: $FILE_COUNT"
 echo ""
 
-# Run the analyzer
-"$ANALYZER" \
+# Run the analyzer on all files in a single invocation to get a single unified report
+echo "$SOURCE_FILES" | xargs "$ANALYZER" \
     -p "$PROJECT_DIR" \
     --risk-threshold "$THRESHOLD" \
-    --extra-arg=-w \
+    --markdown \
     -- \
-    $(echo "$SOURCE_FILES" | head -100) \
-    > "$OUTPUT_FILE" 2>&1 || true
+    >> "$MARKDOWN_FILE" 2>&1 || true
 
-# Also generate JSON output
-"$ANALYZER" \
+# Also generate JSON output for correlation scripts
+echo "$SOURCE_FILES" | xargs "$ANALYZER" \
     -p "$PROJECT_DIR" \
     --risk-threshold "$THRESHOLD" \
     --json \
-    --extra-arg=-w \
     -- \
-    $(echo "$SOURCE_FILES" | head -100) \
-    > "$JSON_FILE" 2>/dev/null || true
+    >> "$JSON_FILE" 2>/dev/null || true
 
 echo ""
 echo "=== Analysis Complete ==="
-echo "Results saved to: $OUTPUT_FILE"
-echo "JSON output:      $JSON_FILE"
+echo "Markdown Dashboard: $MARKDOWN_FILE"
+echo "JSON Results:       $JSON_FILE"
 echo ""
 
 # Quick summary
 echo "=== Quick Summary ==="
-grep -c "CRITICAL" "$OUTPUT_FILE" 2>/dev/null && echo "  critical findings" || echo "  0 critical findings"
-grep -c "HIGH" "$OUTPUT_FILE" 2>/dev/null && echo "  high findings" || echo "  0 high findings"
-grep -c "MEDIUM" "$OUTPUT_FILE" 2>/dev/null && echo "  medium findings" || echo "  0 medium findings"
+grep -c "CRITICAL" "$MARKDOWN_FILE" 2>/dev/null && echo "  critical findings" || echo "  0 critical findings"
+grep -c "HIGH" "$MARKDOWN_FILE" 2>/dev/null && echo "  high findings" || echo "  0 high findings"
+grep -c "MEDIUM" "$MARKDOWN_FILE" 2>/dev/null && echo "  medium findings" || echo "  0 medium findings"

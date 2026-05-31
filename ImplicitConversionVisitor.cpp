@@ -6,6 +6,7 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
 
 using namespace clang;
 
@@ -107,15 +108,53 @@ bool ImplicitConversionVisitor::VisitImplicitCastExpr(ImplicitCastExpr* cast_exp
     finding.explanation = scorer_.explain(ctx, total_score);
     finding.fix_suggestion = fixer_.generateFix(finding);
 
-    // Store all findings (filtering happens at output time)
-    findings_.push_back(finding);
+    // Extract source snippet
+    bool invalid = false;
+    StringRef buffer = sm.getBufferData(sm.getFileID(loc), &invalid);
+    if (!invalid) {
+        unsigned line_start_offset = sm.getFileOffset(sm.getLocForStartOfFile(sm.getFileID(loc)));
+        unsigned loc_offset = sm.getFileOffset(loc);
+        
+        // Find start of line
+        size_t start = buffer.find_last_of("\n\r", loc_offset);
+        if (start == StringRef::npos) start = 0;
+        else start++;
+
+        // Find end of line
+        size_t end = buffer.find_first_of("\n\r", loc_offset);
+        if (end == StringRef::npos) end = buffer.size();
+
+        finding.snippet = buffer.substr(start, end - start).str();
+    }
+
+    // Prevent duplicate findings (e.g. from headers included in multiple files)
+    bool is_duplicate = false;
+    for (const auto& existing : findings_) {
+        if (existing.file == finding.file &&
+            existing.line == finding.line &&
+            existing.column == finding.column &&
+            existing.source_type == finding.source_type &&
+            existing.target_type == finding.target_type) {
+            is_duplicate = true;
+            break;
+        }
+    }
+    if (!is_duplicate) {
+        findings_.push_back(finding);
+    }
 
     return true;
 }
 
 void ImplicitConversionVisitor::printFindings() const {
+    // Create a copy of findings and sort descending by risk score
+    std::vector<Finding> sorted_findings = findings_;
+    std::sort(sorted_findings.begin(), sorted_findings.end(), [](const Finding& a, const Finding& b) {
+        return a.risk_score > b.risk_score;
+    });
+
     int count = 0;
-    for (const auto& f : findings_) {
+    for (const auto& f : sorted_findings) {
         if (!shouldReport(f)) continue;
         count++;
 
@@ -132,7 +171,10 @@ void ImplicitConversionVisitor::printFindings() const {
         llvm::errs() << "\n";
         llvm::errs() << "  " << f.explanation << "\n";
         llvm::errs() << "\n";
-        llvm::errs() << "  Fix: " << f.fix_suggestion << "\n";
+        llvm::errs() << "  Code:     " << f.snippet << "\n";
+        llvm::errs() << "            " << std::string(f.column - 1, ' ') << "^\n";
+        llvm::errs() << "\n";
+        llvm::errs() << "  Fix:      " << f.fix_suggestion << "\n";
         llvm::errs() << "  Category: " << fixer_.fixCategory(f) << "\n";
     }
 

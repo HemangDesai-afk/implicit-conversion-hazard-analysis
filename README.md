@@ -80,62 +80,69 @@ For each high-risk conversion, the tool suggests:
 
 ### Build
 ```bash
-./scripts/build.sh
-# or manually:
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang
-cmake --build build -j$(nproc)
+./build.sh
 ```
 
 ## Usage
 
-### Analyze a single file (no compile database needed)
+The project provides a unified root-level runner script (`./run.sh`) that automates compiling (if needed) and handles common analysis tasks.
+
+### 1. Analyze the core test suite (all 4 hazard patterns)
 ```bash
-./build/implicit-conversion-hazard --risk-threshold 30 myfile.c
+./run.sh --test-suite
 ```
 
-### Analyze with compile_commands.json
+### 2. Analyze a single C/C++ file (compiled independently)
 ```bash
-# Generate compile_commands.json first
-bear -- make   # or cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=1
-
-# Run analyzer
-./build/implicit-conversion-hazard -p /path/to/build/dir \
-    --risk-threshold 50 -- \
-    /path/to/source/file.c
+./run.sh test/test-narrowing.c
 ```
 
-### Analyze all files in a project
+### 3. Compare with `clang -Wconversion` to calculate noise reduction
 ```bash
-./build/implicit-conversion-hazard -p /path/to/build/dir \
-    --risk-threshold 50 -- \
-    file1.c file2.cpp file3.c ...
+./run.sh --compare test/test-sign-compare.c
 ```
 
-### Output modes
+### 4. Run audits on the major OSS codebases
+Running these targets will present a pre-calculated high-signal summary of critical findings (matching `sample_findings_dashboard.md`) and prompt you if you wish to run a live audit:
 ```bash
-# Default: human-readable with findings + summary
-./build/implicit-conversion-hazard --risk-threshold 50 file.c
+./run.sh --sqlite    # Interactive audit of the SQLite database engine
+./run.sh --ffmpeg    # Interactive audit of the FFmpeg multimedia encoder
+./run.sh --openssl   # Interactive audit of the OpenSSL cryptographic core
+```
 
-# Summary only (just counts)
-./build/implicit-conversion-hazard --summary-only file.c
+### 5. Detailed output options
+You can also run the binary directly under `build/` to pass advanced CLI options:
+```bash
+# JSON output for automated scripting
+./build/implicit-conversion-hazard --json test/test-narrowing.c
 
-# JSON output (for automated processing)
-./build/implicit-conversion-hazard --json file.c
+# Consolidated Markdown dashboard output
+./build/implicit-conversion-hazard --markdown test/test-narrowing.c > output.md
 
-# Show all conversions including low-risk
-./build/implicit-conversion-hazard --show-all file.c
+# Show all conversions including low-risk ones (no threshold)
+./build/implicit-conversion-hazard --show-all test/test-narrowing.c
 ```
 
 ### Command-line options
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--risk-threshold N` | Minimum risk score to report (0–100) | 50 |
+| `--risk-threshold N` | Minimum risk score to report (0–100) | 80 |
 | `--show-all` | Report all conversions, regardless of risk | off |
 | `--summary-only` | Only print summary statistics | off |
 | `--json` | Output findings as JSON | off |
 | `-p DIR` | Build directory with compile_commands.json | . |
 | `--extra-arg=FLAG` | Additional compiler flag (e.g., `-xc++`) | — |
+
+## Core Engine Optimizations
+
+### 🚀 Finding Deduplication
+Clang AST traversal often parses header files multiple times across different translation units, causing massive finding inflation. The analyzer now performs **on-visit deduplication** within the visitor class (`ImplicitConversionVisitor.cpp`), checking unique combinations of file, line, column, and types to guarantee that each bug is reported exactly once.
+
+### 📊 Descent Sorting & Truncation
+To maximize developers' focus on high-impact vulnerabilities:
+- All console and Markdown reports are **sorted by risk score in descending order** (highest risk first).
+- Markdown dashboards cap the output to the **top 15 highest-risk findings** to ensure compact, high-signal, and production-ready reports while suppressing thousands of noisy warnings.
+- The raw JSON output (`--json`) remains uncapped for automated CVE correlation and complete auditing.
 
 ## Test Results
 

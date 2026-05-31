@@ -25,6 +25,7 @@ struct Finding {
     ConversionContext context;
     std::string explanation;
     std::string fix_suggestion;
+    std::string snippet;
 };
 
 /// Computes risk scores for implicit conversions based on context

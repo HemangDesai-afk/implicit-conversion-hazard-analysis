@@ -17,6 +17,7 @@
 #include <iostream>
 #include <memory>
 #include <filesystem>
+#include <algorithm>
 
 using namespace clang;
 using namespace clang::tooling;
@@ -27,8 +28,8 @@ static cl::OptionCategory HazardAnalyzerCategory("Implicit Conversion Hazard Ana
 
 static cl::opt<int> RiskThreshold(
     "risk-threshold",
-    cl::desc("Minimum risk score to report (0-100, default: 50)"),
-    cl::init(50),
+    cl::desc("Minimum risk score to report (0-100, default: 80)"),
+    cl::init(80),
     cl::cat(HazardAnalyzerCategory));
 
 static cl::opt<bool> SummaryOnly(
@@ -40,6 +41,12 @@ static cl::opt<bool> SummaryOnly(
 static cl::opt<bool> JsonOutput(
     "json",
     cl::desc("Output findings as JSON"),
+    cl::init(false),
+    cl::cat(HazardAnalyzerCategory));
+    
+static cl::opt<bool> MarkdownOutput(
+    "markdown",
+    cl::desc("Output findings as a consolidated Markdown dashboard"),
     cl::init(false),
     cl::cat(HazardAnalyzerCategory));
 
@@ -75,6 +82,8 @@ public:
 
         if (JsonOutput) {
             printJson();
+        } else if (MarkdownOutput) {
+            printMarkdown();
         } else {
             if (!SummaryOnly) {
                 visitor_.printFindings();
@@ -85,6 +94,72 @@ public:
 
 private:
     ImplicitConversionVisitor visitor_;
+
+    void printMarkdown() const {
+        const auto& findings = visitor_.getFindings();
+        
+        std::cout << "# Implicit Conversion Hazard Dashboard\n\n";
+        
+        // Copy and sort findings by risk score (descending)
+        std::vector<Finding> sorted_findings = findings;
+        std::sort(sorted_findings.begin(), sorted_findings.end(), [](const Finding& a, const Finding& b) {
+            return a.risk_score > b.risk_score;
+        });
+
+        // Summary Table
+        int total = sorted_findings.size();
+        int crit = 0, high = 0, med = 0, low = 0;
+        for (const auto& f : sorted_findings) {
+            switch (f.risk_level) {
+                case RiskLevel::CRITICAL: crit++; break;
+                case RiskLevel::HIGH:     high++; break;
+                case RiskLevel::MEDIUM:  med++; break;
+                case RiskLevel::LOW:     low++; break;
+            }
+        }
+        
+        std::cout << "## Executive Summary\n\n";
+        std::cout << "| Severity | Count | Color |\n";
+        std::cout << "| :--- | :--- | :--- |\n";
+        std::cout << "| **CRITICAL** | " << crit << " | 🔴 |\n";
+        std::cout << "| **HIGH** | " << high << " | 🟠 |\n";
+        std::cout << "| **MEDIUM** | " << med << " | 🟡 |\n";
+        std::cout << "| **LOW** | " << low << " | 🔵 |\n\n";
+        
+        std::cout << "## Findings Detail (Top Critical & High Risk)\n\n";
+        
+        int printed_count = 0;
+        const int MAX_PRINTED_FINDINGS = 15; // Limit output size to prevent massive file generation
+
+        for (const auto& f : sorted_findings) {
+            if (f.risk_score < (ShowAll ? 0 : RiskThreshold)) continue; 
+            if (printed_count >= MAX_PRINTED_FINDINGS) {
+                std::cout << "*... and " << (total - printed_count) << " more findings omitted to keep report concise.*\n\n";
+                break;
+            }
+            printed_count++;
+            
+            std::string emoji = "🔵";
+            if (f.risk_level == RiskLevel::CRITICAL) emoji = "🔴";
+            else if (f.risk_level == RiskLevel::HIGH) emoji = "🟠";
+            else if (f.risk_level == RiskLevel::MEDIUM) emoji = "🟡";
+            
+            std::cout << "### " << emoji << " " << RiskScorer::levelLabel(f.risk_level) 
+                      << " (" << f.risk_score << "/100)\n\n";
+            std::cout << "**Location**: `" << f.file << ":" << f.line << ":" << f.column << "`  \n";
+            std::cout << "**Conversion**: `" << f.source_type << "` → `" << f.target_type << "` (`" << f.conversion_kind << "`)\n\n";
+            
+            std::cout << "> " << f.explanation << "\n\n";
+            
+            std::cout << "```c\n";
+            std::cout << f.snippet << "\n";
+            std::cout << std::string(f.column - 1, ' ') << "^\n";
+            std::cout << "```\n\n";
+            
+            std::cout << "**Fix**: " << f.fix_suggestion << "\n\n";
+            std::cout << "---\n\n";
+        }
+    }
 
     void printJson() const {
         const auto& findings = visitor_.getFindings();
@@ -101,7 +176,8 @@ private:
             std::cout << "    \"risk_score\": " << f.risk_score << ",\n";
             std::cout << "    \"risk_level\": \"" << escapeJson(RiskScorer::levelLabel(f.risk_level)) << "\",\n";
             std::cout << "    \"explanation\": \"" << escapeJson(f.explanation) << "\",\n";
-            std::cout << "    \"fix_suggestion\": \"" << escapeJson(f.fix_suggestion) << "\"\n";
+            std::cout << "    \"fix_suggestion\": \"" << escapeJson(f.fix_suggestion) << "\",\n";
+            std::cout << "    \"snippet\": \"" << escapeJson(f.snippet) << "\"\n";
             std::cout << "  }";
             if (i + 1 < findings.size()) std::cout << ",";
             std::cout << "\n";
@@ -161,15 +237,20 @@ int main(int argc, const char** argv) {
 
     // Load compile database
     std::string error_message;
-    auto comp_db_ptr = JSONCompilationDatabase::loadFromDirectory(
-        build_path, error_message);
-
-    if (!comp_db_ptr) {
-        // If no compile_commands.json, try creating a simple one
-        // by using -xc -std=c11 defaults
-        llvm::errs() << "Warning: Could not load compile_commands.json from "
-                      << build_path << ": " << error_message << "\n";
-        llvm::errs() << "Using default compilation flags: -xc -std=c11\n\n";
+    std::unique_ptr<CompilationDatabase> comp_db_ptr;
+    
+    // Only attempt loading if -p was explicitly set or compile_commands.json exists
+    bool explicit_p = (CompileCommandsDir.getNumOccurrences() > 0);
+    bool file_exists = std::filesystem::exists(build_path + "/compile_commands.json");
+    
+    if (explicit_p || file_exists) {
+        comp_db_ptr = JSONCompilationDatabase::loadFromDirectory(
+            build_path, error_message);
+        if (!comp_db_ptr && explicit_p) {
+            llvm::errs() << "Warning: Could not load compile_commands.json from "
+                          << build_path << ": " << error_message << "\n";
+            llvm::errs() << "Using default compilation flags as fallback...\n\n";
+        }
     }
 
     // Resolve source files to absolute paths
