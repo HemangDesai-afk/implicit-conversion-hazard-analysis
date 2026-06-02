@@ -5,6 +5,12 @@ conversions in C/C++ code. Unlike `-Wconversion` (which is too noisy) or
 `-Wsign-compare` (which is too narrow), this tool categorizes implicit conversions
 by **actual risk level** using data-flow context.
 
+## Demonstration
+
+Watch the tool in action, demonstrating compilation database handling, risk-prioritized sorting, noise reduction, and live audits of major open-source projects:
+
+[![Implicit Conversion Hazard Analyzer Demonstration](https://img.shields.io/badge/Demonstration-Watch%20on%20YouTube-red?style=for-the-badge&logo=youtube)](https://youtu.be/e9B3AynIMzA)
+
 ## The Problem
 
 C/C++ implicit conversions cause a class of bugs that compilers warn about
