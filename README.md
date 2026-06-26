@@ -1,159 +1,215 @@
-# Implicit Conversion Hazard Analyzer
+# 🛡️ Implicit Conversion Hazard Analyzer
 
-A Clang AST-based static analysis tool that identifies dangerous implicit type
-conversions in C/C++ code. Unlike `-Wconversion` (which is too noisy) or
-`-Wsign-compare` (which is too narrow), this tool categorizes implicit conversions
-by **actual risk level** using data-flow context.
+[![C++ Standard](https://img.shields.io/badge/C%2B%2B-17-blue.svg?style=flat-square&logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
+[![Clang Version](https://img.shields.io/badge/Clang-17%20%7C%2018-7B1FA2.svg?style=flat-square&logo=llvm)](https://clang.llvm.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
+[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg?style=flat-square)](build.sh)
+[![Demo](https://img.shields.io/badge/Walkthrough-YouTube-red?style=flat-square&logo=youtube)](https://youtu.be/e9B3AynIMzA)
 
-## Demonstration
+A Clang AST-based static analysis tool that identifies dangerous implicit type conversions in C/C++ code. Unlike `-Wconversion` (which is too noisy) or `-Wsign-compare` (which is too narrow), this tool categorizes implicit conversions by **actual risk level** using data-flow context.
 
-Watch the tool in action, demonstrating compilation database handling, risk-prioritized sorting, noise reduction, and live audits of major open-source projects:
+---
 
-[![Implicit Conversion Hazard Analyzer Demonstration](https://img.shields.io/badge/Demonstration-Watch%20on%20YouTube-red?style=for-the-badge&logo=youtube)](https://youtu.be/e9B3AynIMzA)
+## 🎥 Demonstration Walkthrough
 
-## The Problem
+Explore the analyzer in action! This walkthrough video demonstrates compilation database detection, risk-prioritized output, noise filtering, and live security audits on open-source projects (SQLite, FFmpeg, and OpenSSL).
 
-C/C++ implicit conversions cause a class of bugs that compilers warn about
-inconsistently. A narrowing conversion in a loop bound is far more dangerous
-than one in a logging statement — but no existing tool makes this distinction.
+<p align="center">
+  <a href="https://youtu.be/e9B3AynIMzA" target="_blank">
+    <img src="https://img.youtube.com/vi/e9B3AynIMzA/maxresdefault.jpg" alt="Implicit Conversion Hazard Analyzer Demo" width="640" style="border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); border: 1px solid #444;"/>
+  </a>
+  <br>
+  <em>Click the image above to watch the walkthrough on YouTube</em>
+</p>
 
-Common dangerous patterns:
-- **Sign mismatch in comparisons**: `int i = -1; if (i < size_t_val)` — always true
-- **Float-to-int in loop bounds**: `for (int i = 0; i < double_val; i++)` — truncation
-- **Narrowing in function arguments**: `take_short(long_long_val)` — silent truncation
-- **Enum-to-int in switch**: missing case coverage silently accepted
+---
 
-## How It Works
+## ⚠️ The Problem
+
+C/C++ implicit conversions cause a class of bugs that compilers warn about inconsistently. A narrowing conversion in a loop bound is far more dangerous than one in a logging statement — but no existing compiler or tool makes this distinction.
+
+### Common Dangerous Patterns
+
+```cpp
+// 1. Sign mismatch in comparisons (always true/false)
+int i = -1;
+if (i < size_t_val) { ... } // Silent conversion to large unsigned value
+
+// 2. Float-to-int in loop bounds (silent truncation)
+for (int i = 0; i < double_val; i++) { ... }
+
+// 3. Narrowing in function arguments (precision loss)
+void take_short(short s);
+take_short(long_long_val); // Silent truncation
+
+// 4. Enum-to-int in switch conditions
+switch (enum_val) { ... } // Missing case coverage is silently accepted
+```
+
+---
+
+## ⚙️ How It Works
 
 ### Architecture
+The analyzer integrates into Clang's front-end compilation pipeline to trace expression ASTs:
 
-```
-Source Code → ClangTool → AST Traversal → ImplicitCastExpr Detection
-                                              ↓
-                                    Context Collection
-                                    (loop bound? array index?
-                                     comparison? API boundary?)
-                                              ↓
-                                    Risk Scoring (0-100)
-                                    (base risk + context weights)
-                                              ↓
-                                    Fix-It Generation
-                                    (static_cast? type change?
-                                     sign fix? loop fix?)
-                                              ↓
-                                    Filtered Report
-                                    (only above threshold)
+```mermaid
+graph TD
+    A[Source Code] --> B[Clang Tooling / AST Front-end]
+    B --> C[AST Traversal via RecursiveASTVisitor]
+    C --> D[ImplicitCastExpr Detection]
+    D --> E[Context Collector]
+    E -->|Loop bounds, Array indices, Comparisons, API boundaries| F[Risk Scorer Engine]
+    F -->|Risk Score 0-100| G[Fix-It Suggestions Generator]
+    G --> H[Risk-Sorted Dashboard / JSON Report]
+    
+    style A fill:#1e1e2e,stroke:#313244,stroke-width:2px,color:#cdd6f4
+    style B fill:#313244,stroke:#45475a,color:#cdd6f4
+    style C fill:#313244,stroke:#45475a,color:#cdd6f4
+    style D fill:#89b4fa,stroke:#1e66f5,stroke-width:2px,color:#11111b
+    style E fill:#f9e2af,stroke:#df8e1d,stroke-width:2px,color:#11111b
+    style F fill:#f38ba8,stroke:#d20f39,stroke-width:2px,color:#11111b
+    style G fill:#a6e3a1,stroke:#40a02b,stroke-width:2px,color:#11111b
+    style H fill:#11111b,stroke:#a6e3a1,stroke-width:3px,color:#a6e3a1
 ```
 
 ### Risk Scoring Model
 
-Each implicit conversion receives a score from 0–100 based on:
+Each implicit conversion receives a score from **0–100** based on the syntactic context and conversion category:
 
-| Context | Weight | Example |
-|---------|--------|---------|
-| Array index operand | +30 | `arr[negative_int]` → OOB |
-| Loop bound / iteration | +25 | `for (int i = 0; i < size_t; i++)` |
-| Sign-mismatch comparison | +35 | `int < size_t` where int is negative |
-| Function argument at API boundary | +30 | `syscall(int_param)` where API expects `size_t` |
-| Switch condition (enum-to-int) | +15 | `switch (enum_val)` with missing cases |
-| Arithmetic operand | +15 | `int * double` → truncation |
-| Assignment to smaller type | +10 | `char = long_long` |
-| Logging/printing | +2 | `printf("%d", double)` |
-| Inside explicit cast | −40 | `static_cast<T>(expr)` — developer acknowledged |
-| Literal source | −10 | `char x = 42` — constant, predictable |
+| Context Attribute | Weight | Example | Risk Implications |
+| :--- | :---: | :--- | :--- |
+| **Sign-mismatch comparison** | `+35` | `int < size_t` where int is negative | Out-of-bounds bypass, infinite loops |
+| **Array index operand** | `+30` | `arr[negative_int]` | Out-of-bounds memory access (OOB) |
+| **API / System boundary** | `+30` | `syscall(int_param)` where expected is `size_t` | Privilege escalation, incorrect sizes |
+| **Loop bound / iteration** | `+25` | `for (int i = 0; i < size_t; i++)` | Infinite loops, early termination |
+| **Switch condition** | `+15` | `switch (enum_val)` with missing cases | Unhandled application states |
+| **Arithmetic operand** | `+15` | `int * double` | Loss of fractional precision |
+| **Assignment to smaller type** | `+10` | `char = long_long` | Narrowing / truncation |
+| **Logging / printing** | `+2` | `printf("%d", double)` | Low-risk formatting conversion |
+| **Inside explicit cast** | `-40` | `static_cast<T>(expr)` | Developer intent is explicit |
+| **Literal source** | `-10` | `char x = 42` | Constant value is bounds-checked |
 
-Base risk from conversion kind:
-- `float`/`double` → `int`: +40 (truncation)
-- Signed ↔ Unsigned: +35 (sign flip)
-- Larger → Smaller integer: +25 (narrowing)
-- Pointer ↔ Integer: +30 (portability)
+#### Base Risk by Type Category:
+* **Float / Double ➔ Integer**: `+40` (Truncation / loss of scale)
+* **Signed ➔ Unsigned / Unsigned ➔ Signed**: `+35` (Sign flip / high-bit corruption)
+* **Pointer ➔ Integer / Integer ➔ Pointer**: `+30` (Portability / address corruption)
+* **Larger Integer ➔ Smaller Integer**: `+25` (Narrowing / silent truncation)
 
 ### Fix-It Suggestions
 
-For each high-risk conversion, the tool suggests:
-1. **`static_cast<T>`**: Makes the conversion explicit and visible
-2. **Type change**: Change the variable/parameter type to match
-3. **Sign fix**: For signed/unsigned comparisons, specific guidance
-4. **Loop fix**: For loop bounds, correct iteration patterns
-5. **Scoped enum**: For enum-to-int, use `enum class`
+For each high-risk conversion, the tool provides context-aware refactoring options:
+1. 💡 **`static_cast<T>`**: Standard explicit cast to declare developer intent.
+2. 💡 **Type Alignment**: Suggestions to change the variable declaration type to match the context.
+3. 💡 **Sign Unification**: Casting loops or variables to prevent sign-mismatch comparisons.
+4. 💡 **Scoped Enums**: Recommending `enum class` to enforce compiler-checked switches.
 
-## Building
+---
+
+## 🛠️ Installation & Building
 
 ### Prerequisites
-- Clang 17+ development libraries (with libclang-cpp)
-- CMake 3.13+
-- C++17 compiler
+* Clang 17+ development libraries (including `libclang-cpp`)
+* CMake 3.13+
+* A C++17 compatible compiler (GCC/Clang)
 
-### Build
+### Compilation
+Simply execute the build wrapper script:
 ```bash
 ./build.sh
 ```
 
-## Usage
+---
 
-The project provides a unified root-level runner script (`./run.sh`) that automates compiling (if needed) and handles common analysis tasks.
+## 🚀 Usage Guide
 
-### 1. Analyze the core test suite (all 4 hazard patterns)
+The project provides a unified runner script (`./run.sh`) that automates compilations and routes standard static analysis targets.
+
+### Analysis Targets
+
+#### 1. Run the Diagnostic Test Suite
+Analyzes all 4 pre-configured hazard scenarios:
 ```bash
 ./run.sh --test-suite
 ```
 
-### 2. Analyze a single C/C++ file (compiled independently)
+#### 2. Analyze a Specific Source File
 ```bash
 ./run.sh test/test-narrowing.c
 ```
 
-### 3. Compare with `clang -Wconversion` to calculate noise reduction
+#### 3. Noise Reduction Comparison
+Compares our high-risk output against verbose `clang -Wconversion` warnings:
 ```bash
 ./run.sh --compare test/test-sign-compare.c
 ```
 
-### 4. Run audits on the major OSS codebases
-Running these targets will present a pre-calculated high-signal summary of critical findings (matching `sample_findings_dashboard.md`) and prompt you if you wish to run a live audit:
+#### 4. Run Audits on Open-Source Codebases
+Performs an interactive static audit on popular open-source software libraries. It displays a pre-calculated high-risk dashboard and allows running a fresh audit:
 ```bash
-./run.sh --sqlite    # Interactive audit of the SQLite database engine
-./run.sh --ffmpeg    # Interactive audit of the FFmpeg multimedia encoder
-./run.sh --openssl   # Interactive audit of the OpenSSL cryptographic core
+./run.sh --sqlite    # Audit SQLite Database Engine
+./run.sh --ffmpeg    # Audit FFmpeg Multimedia Library
+./run.sh --openssl   # Audit OpenSSL Cryptographic Suite
 ```
 
-### 5. Detailed output options
-You can also run the binary directly under `build/` to pass advanced CLI options:
+#### 5. Output Formatting Options
+Run the compiled binary directly to use advanced CLI options:
 ```bash
-# JSON output for automated scripting
+# JSON output for CI/CD integrations
 ./build/implicit-conversion-hazard --json test/test-narrowing.c
 
-# Consolidated Markdown dashboard output
-./build/implicit-conversion-hazard --markdown test/test-narrowing.c > output.md
+# Export a consolidated Markdown dashboard report
+./build/implicit-conversion-hazard --markdown test/test-narrowing.c > report.md
 
-# Show all conversions including low-risk ones (no threshold)
+# Show all findings, disabling the risk threshold filter
 ./build/implicit-conversion-hazard --show-all test/test-narrowing.c
 ```
 
-### Command-line options
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--risk-threshold N` | Minimum risk score to report (0–100) | 80 |
-| `--show-all` | Report all conversions, regardless of risk | off |
-| `--summary-only` | Only print summary statistics | off |
-| `--json` | Output findings as JSON | off |
-| `-p DIR` | Build directory with compile_commands.json | . |
-| `--extra-arg=FLAG` | Additional compiler flag (e.g., `-xc++`) | — |
+### CLI Command Options
 
-## Core Engine Optimizations
+| Option Flag | Description | Default |
+| :--- | :--- | :--- |
+| `--risk-threshold <0-100>` | Minimum risk score to report findings | `80` |
+| `--show-all` | Report all implicit conversions, bypassing the risk threshold | `off` |
+| `--summary-only` | Output only the summary statistics table | `off` |
+| `--json` | Return findings in JSON structure | `off` |
+| `-p <build-dir>` | Directory containing `compile_commands.json` | `.` |
+| `--extra-arg=<flag>` | Append extra compiler flags (e.g., `-xc++`) | None |
+
+---
+
+## ⚡ Core Engine Optimizations
 
 ### 🚀 Finding Deduplication
-Clang AST traversal often parses header files multiple times across different translation units, causing massive finding inflation. The analyzer now performs **on-visit deduplication** within the visitor class (`ImplicitConversionVisitor.cpp`), checking unique combinations of file, line, column, and types to guarantee that each bug is reported exactly once.
+Clang AST traversal parses header files multiple times across translation units, causing massive finding duplicate bloat. The analyzer implements an **on-visit deduplication index** within the visitor class (`ImplicitConversionVisitor.cpp`), checking unique combinations of source location (file, line, column) and type transitions to guarantee that each issue is reported exactly once.
 
-### 📊 Descent Sorting & Truncation
-To maximize developers' focus on high-impact vulnerabilities:
-- All console and Markdown reports are **sorted by risk score in descending order** (highest risk first).
-- Markdown dashboards cap the output to the **top 15 highest-risk findings** to ensure compact, high-signal, and production-ready reports while suppressing thousands of noisy warnings.
-- The raw JSON output (`--json`) remains uncapped for automated CVE correlation and complete auditing.
+### 📊 Descending Score Sorting & Dashboard Capping
+To focus developer attention on the most critical bugs:
+* Reports are sorted in **descending order by risk score** (highest risk first).
+* The Markdown dashboard report generator caps findings at the **top 15 highest-risk items** to ensure clean, high-signal, and actionable dashboards.
+* Complete raw findings are preserved in the uncapped JSON output (`--json`) for security tools integration.
 
-## Test Results
+---
 
-### Test: Narrowing Conversions (`test/test-narrowing.c`)
-```
+## 📊 Noise Reduction vs. Clang `-Wconversion`
+
+| Metric | `-Wconversion` | This Tool |
+| :--- | :---: | :---: |
+| **Total warnings** | Very High (unactionable noise) | High-signal filtered list |
+| **Context awareness** | None (lexical) | Full AST context tracking |
+| **Sign-mismatch detection** | Incomplete (`-Wsign-compare`) | Complete risk checking |
+| **Fix-it guidance** | Generic or missing | Categorized & contextual |
+| **False-Positive Rate** | `~60–80%` | **`< 30%`** (Target) |
+
+---
+
+## 📈 Test Suite Results
+
+<details>
+<summary>🔍 Click to expand diagnostic test output</summary>
+
+### Narrowing Conversions (`test/test-narrowing.c`)
+```text
 Total implicit conversions: 7
 CRITICAL: 0  HIGH: 2  MEDIUM: 4  LOW: 1
 
@@ -162,8 +218,8 @@ Key findings:
 - unsigned int → unsigned short (narrowing in function argument): HIGH 55/100
 ```
 
-### Test: Sign Comparison (`test/test-sign-compare.c`)
-```
+### Sign Comparisons (`test/test-sign-compare.c`)
+```text
 Total implicit conversions: 13
 CRITICAL: 1  HIGH: 5  MEDIUM: 5  LOW: 2
 
@@ -173,8 +229,8 @@ Key findings:
 - unsigned int loop wrap-around (i >= 0 always true): HIGH 70/100
 ```
 
-### Test: Float-to-Int (`test/test-float-loop.c`)
-```
+### Float-to-Int Loop Bounds (`test/test-float-loop.c`)
+```text
 Total implicit conversions: 7
 CRITICAL: 0  HIGH: 3  MEDIUM: 4  LOW: 0
 
@@ -183,8 +239,8 @@ Key findings:
 - double → int truncation in assignment: HIGH 55/100
 ```
 
-### Test: Enum Conversions (`test/test-enum-switch.c`)
-```
+### Enum-to-Switch Checks (`test/test-enum-switch.c`)
+```text
 Total implicit conversions: 17
 CRITICAL: 0  HIGH: 6  MEDIUM: 2  LOW: 9
 
@@ -193,76 +249,51 @@ Key findings:
 - Different enum types in comparison: HIGH 65/100
 - Enum in switch condition (missing case): MEDIUM 35/100
 ```
+</details>
 
-## Evaluation (Phases 8–9)
+---
 
-### Planned Analysis Targets
-1. **SQLite** — known integer-related CVEs (CVE-2015-7036)
-2. **LibPNG** — integer overflow CVEs (CVE-2015-8126, CVE-2016-10087)
-3. **cURL** or **OpenSSL** — complex C with API boundaries
+## 📂 Repository File Structure
 
-### False-Positive Rate Comparison
-```bash
-# Compare against clang -Wconversion
-./evaluation/compare_wconversion.sh test/test-sign-compare.c
-
-# Correlate findings with known CVEs
-./evaluation/run_on_project.sh /path/to/sqlite --threshold 50
-python3 evaluation/cve_correlation.py output/sqlite_findings.json cves/sqlite_cves.json
-```
-
-## Portability & Sharing
-
-This project is designed to be portable across Linux distributions (Fedora, Ubuntu, WSL). However, please note:
-
-- **Do NOT share the `build/` directory**: This folder contains absolute paths and binary files specific to your machine. Your friend should create their own `build/` directory.
-- **Do NOT share `compile_commands.json`**: This file contains absolute paths to the source files on your specific system. It should be regenerated on each new machine.
-- **Portability Logic**: The `CMakeLists.txt` is configured to automatically detect LLVM installations and system headers on both Fedora and Ubuntu/WSL.
-
-To share with a friend, only send the source files and `CMakeLists.txt` (or use the `.gitignore` provided).
-
-## Comparison with clang -Wconversion
-
-| Metric | `-Wconversion` | This Tool |
-|--------|---------------|-----------|
-| Total warnings | High (noisy) | Filtered by risk |
-| Context awareness | None | Full AST context |
-| Sign mismatch detection | Partial (-Wsign-compare) | Complete |
-| Fix-It suggestions | Some | Detailed, categorized |
-| FP rate | ~60–80% | Target: <30% |
-
-## File Structure
-
-```
+```text
 implicit-conversion-hazard/
-├── CMakeLists.txt                 # Build system
-├── main.cpp                       # Entry point + CLI
-├── ImplicitConversionVisitor.h/.cpp  # AST visitor
-├── ContextCollector.h/.cpp        # Context metadata extraction
-├── RiskScorer.h/.cpp              # Risk scoring model
-├── FixItGenerator.h/.cpp          # Fix-It suggestions
-├── SimpleCompilationDB.h          # Fallback compilation database
-├── compile_commands.json          # For test files
-├── test/
-│   ├── test-narrowing.c           # Narrowing conversion tests
-│   ├── test-sign-compare.c        # Sign mismatch tests
-│   ├── test-float-loop.c          # Float-to-int tests
-│   └── test-enum-switch.c         # Enum conversion tests
-├── evaluation/
-│   ├── run_on_project.sh          # Run on OSS project
-│   ├── compare_wconversion.sh     # FP rate comparison
-│   └── cve_correlation.py         # CVE cross-referencing
+├── CMakeLists.txt                    # Build system configuration
+├── main.cpp                          # CLI front-end and controller
+├── ImplicitConversionVisitor.h/.cpp     # Core Clang AST visitor
+├── ContextCollector.h/.cpp           # Code block and usage context retriever
+├── RiskScorer.h/.cpp                 # Risk logic and scoring weights
+├── FixItGenerator.h/.cpp             # Refactoring suggestions generator
+├── SimpleCompilationDB.h             # Fallback compiler DB for isolated files
+├── compile_commands.json             # Test configuration compilation DB
+├── test/                             # Custom test suite directories
+│   ├── test-narrowing.c
+│   ├── test-sign-compare.c
+│   ├── test-float-loop.c
+│   └── test-enum-switch.c
+├── evaluation/                       # Comparison & benchmarking utilities
+│   ├── run_on_project.sh
+│   ├── compare_wconversion.sh
+│   └── cve_correlation.py
 └── scripts/
-    └── build.sh                   # Build wrapper
+    └── build.sh                      # Compilation automation
 ```
 
-## Limitations
+---
 
-- **No interprocedural analysis**: Doesn't track types across function boundaries
-- **No value-set analysis**: Doesn't determine if a variable's range fits the target type
-- **Single-TU only**: Analyzes one translation unit at a time
-- **Requires Clang AST**: GCC and MSVC code paths not supported
+> [!WARNING]
+> **Important Build & Portability Instructions:**
+> * **Do NOT share the `build/` directory**: This folder contains absolute compiler paths and binaries configured strictly for your current CPU architecture and OS paths.
+> * **Do NOT share `compile_commands.json`**: This index references local absolute paths on this machine. Let CMake generate a fresh version on other setups.
 
-## License
+---
 
-MIT
+## 🔴 Limitations
+* **Intra-procedural only**: Does not trace type mutations across deep inter-procedural calls.
+* **No range value-set analysis**: Cannot detect if runtime variable ranges safely fit smaller types.
+* **Single-TU constraints**: Analyzes one Translation Unit at a time.
+* **Clang AST dependent**: Requires compiler compatibility (GCC/MSVC code paths are not supported).
+
+---
+
+## 📄 License
+Licensed under the [MIT License](LICENSE).
